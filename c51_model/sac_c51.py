@@ -137,18 +137,11 @@ class C51SAC(OffPolicyAlgorithm):
 
     def projection(self, support_rows, target_z):
         projected_target_z = th.zeros_like(target_z)
-        support_rows = support_rows.clamp(self.min_v, self.max_v)
-        for i, support_row in enumerate(support_rows):
-            for j, support in enumerate(support_row):
-                for k, base_support in enumerate(self.supports):
-                    if support <= base_support:
-                        p = (base_support - support) / self.interval
-                        if k == 0:
-                            projected_target_z[i][k] += p * target_z[i][k]
-                        else:
-                            projected_target_z[i][k] += p * target_z[i][k]
-                            projected_target_z[i][k - 1] += (1 - p) * target_z[i][k]
-                        break
+        support_rows = support_rows.clamp(self.min_v, self.max_v - 1e-3)
+        p = ((support_rows - self.min_v) % self.interval) / self.interval
+        idx = ((support_rows - self.min_v) // self.interval).long()
+        projected_target_z = projected_target_z.scatter_add(1, idx, target_z * p)
+        projected_target_z = projected_target_z.scatter_add(1, idx + 1, target_z * (1 - p))
 
         return projected_target_z
 
@@ -210,10 +203,10 @@ class C51SAC(OffPolicyAlgorithm):
             # Get current Q-values estimates for each critic network
             # using action from the replay buffer
             current_zs = th.cat(self.critic(replay_data.observations, replay_data.actions), dim=1)
-            # target_zs = self.projection(target_supports, target_zs)
+            target_zs = self.projection(target_supports, target_zs)
             # Compute critic loss
 
-            critic_loss = -th.sum(th.log(current_zs) * target_zs)
+            critic_loss = -th.mean(th.log(current_zs) * target_zs)
             critic_losses.append(critic_loss.item())
 
             # Optimize the critic
@@ -287,8 +280,9 @@ class C51SAC(OffPolicyAlgorithm):
 
 if __name__ == "__main__":
     from stable_baselines3 import SAC
-    env = gym.make("Pendulum-v0")
+    env = gym.make("LunarLanderContinuous-v2")
 
-    model = C51SAC(C51SACPolicy, env, min_v=0, max_v=10, support_dim=64, verbose=1)
-    model.learn(10000)
+    model = SAC(SACPolicy, env, verbose=1)
+    # model = C51SAC(C51SACPolicy, env, min_v=-200, max_v=300, support_dim=512, verbose=1)
+    model.learn(100000)
 
