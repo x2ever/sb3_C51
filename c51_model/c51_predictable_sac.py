@@ -16,7 +16,7 @@ class CMVCVaRSAC(OffPolicyAlgorithm):
         learning_rate: Union[float, Schedule] = 3e-4,
         buffer_size: int = int(1e6),
         learning_starts: int = 100,
-        batch_size: int = 256,
+        batch_size: int = 64,
         tau: float = 0.005,
         gamma: float = 0.99,
         train_freq: Union[int, Tuple[int, str]] = 1,
@@ -36,6 +36,7 @@ class CMVCVaRSAC(OffPolicyAlgorithm):
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
+        cvar_alpha = 0.3
     ):
         super(CMVCVaRSAC, self).__init__(
             policy,
@@ -78,6 +79,7 @@ class CMVCVaRSAC(OffPolicyAlgorithm):
             np.array([min_v + i * self.interval for i in range(support_dim)], dtype=np.float32)
         ).to(self.device)
         self._total_timesteps = None
+        self.cvar_alpha = cvar_alpha
         if _init_setup_model:
             self._setup_model()
 
@@ -274,7 +276,7 @@ class CMVCVaRSAC(OffPolicyAlgorithm):
 
             z_cdf = th.cumsum(z_pi, dim=-1)
             adjust_pdf = th.where(
-                th.le(z_cdf, 0.3),
+                th.le(z_cdf, self.cvar_alpha),
                 z_pi,
                 th.zeros_like(z_pi)
             )
@@ -357,12 +359,7 @@ if __name__ == "__main__":
     from stable_baselines3 import SAC
     from Navigation2d import NavigationEnvAcc, DeployEnv
     from Navigation2d.config import obs_set, goal_set
-    env = NavigationEnvAcc({"OBSTACLE_POSITIONS": obs_set[1], "Goal": goal_set[-1]})
-
-    # model = SAC(SACPolicy, env, verbose=1)
-    model = CMVCVaRSAC(CMVC51SACPolicy, env, min_v=-25, max_v=25, support_dim=200, verbose=1)
-    model.learn(300000)
-    # model.save("CVaR-0.3")
+    from stable_baselines3.common.vec_env import SubprocVecEnv
 
 
     def evaluate(env, model, ep_n, alpha):
@@ -397,7 +394,12 @@ if __name__ == "__main__":
 
     import pickle
     for alpha in [0.2, 0.3, 0.4, 1.0]:
-        model = CMVCVaRSAC.load(f"CVaR-{alpha}", min_v=-25, max_v=25, support_dim=200)
+        env = SubprocVecEnv(
+            [lambda: NavigationEnvAcc({"OBSTACLE_POSITIONS": obs_set[1], "Goal": goal_set[-1]}) for _ in range(1)])
+        model = CMVCVaRSAC(env=env, policy=CMVC51SACPolicy, min_v=-25, max_v=25, support_dim=200, cvar_alpha=alpha,
+                           verbose=1, batch_size=64)
+        model.learn(300000)
+        model.save(f"CMVCVaR{alpha}")
         log = evaluate(env, model, 1000, alpha)
         data = {
             "min_v": 25,
@@ -408,4 +410,5 @@ if __name__ == "__main__":
         }
         with open(f'alpha{alpha}_ep_log.txt', 'wb') as f:
             pickle.dump(data, f)
+        del model
 
