@@ -1,6 +1,8 @@
 from stable_baselines3.sac.sac import *
 from c51 import C51SACPolicy
 from stable_baselines3.common.buffers import ReplayBuffer
+from datetime import timedelta
+import time 
 
 
 class C51SAC(OffPolicyAlgorithm):
@@ -75,6 +77,7 @@ class C51SAC(OffPolicyAlgorithm):
         self.supports = th.from_numpy(
             np.array([min_v + i * self.interval for i in range(support_dim)], dtype=np.float32)
         ).to(self.device)
+        self.total_timesteps = None
 
         if _init_setup_model:
             self._setup_model()
@@ -235,6 +238,11 @@ class C51SAC(OffPolicyAlgorithm):
 
         self._n_updates += gradient_steps
 
+        fps = int(self.num_timesteps / (time.time() - self.start_time))
+        remaining_steps = self.total_timesteps - self.num_timesteps
+
+        eta = int(round(remaining_steps / fps))
+        logger.record("time/eta", timedelta(seconds=eta), exclude="tensorboard")
         logger.record("train/Q", np.mean(qs))
         logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         logger.record("train/ent_coef", np.mean(ent_coefs))
@@ -255,7 +263,7 @@ class C51SAC(OffPolicyAlgorithm):
         eval_log_path: Optional[str] = None,
         reset_num_timesteps: bool = True,
     ) -> OffPolicyAlgorithm:
-
+        self.total_timesteps = total_timesteps
         return super(C51SAC, self).learn(
             total_timesteps=total_timesteps,
             callback=callback,

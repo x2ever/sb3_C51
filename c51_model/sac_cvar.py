@@ -1,6 +1,8 @@
 from stable_baselines3.sac.sac import *
 from c51 import C51SACPolicy
 from stable_baselines3.common.buffers import ReplayBuffer
+import time
+from datetime import timedelta
 
 
 class CVaRSAC(OffPolicyAlgorithm):
@@ -244,7 +246,11 @@ class CVaRSAC(OffPolicyAlgorithm):
                 polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
 
         self._n_updates += gradient_steps
+        fps = int(self.num_timesteps / (time.time() - self.start_time))
+        remaining_steps = self.total_timesteps - self.num_timesteps
 
+        eta = int(round(remaining_steps / fps))
+        logger.record("time/eta", timedelta(seconds=eta), exclude="tensorboard")
         logger.record("train/CVaR", np.mean(cvars))
         logger.record("train/Q", np.mean(qs))
         logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
