@@ -14,7 +14,7 @@ class CMVCVaRSAC(OffPolicyAlgorithm):
         max_v: float = +25,
         support_dim: int = 200,
         learning_rate: Union[float, Schedule] = 3e-4,
-        buffer_size: int = int(1e6),
+        buffer_size: int = int(5e4),
         learning_starts: int = 100,
         batch_size: int = 64,
         tau: float = 0.005,
