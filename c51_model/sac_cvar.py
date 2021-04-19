@@ -3,14 +3,14 @@ from c51 import C51SACPolicy
 from stable_baselines3.common.buffers import ReplayBuffer
 
 
-class C51SAC(OffPolicyAlgorithm):
+class CVaRSAC(OffPolicyAlgorithm):
     def __init__(
         self,
         policy: Union[str, Type[C51SACPolicy]],
         env: Union[GymEnv, str],
-        min_v: float,
-        max_v: float,
-        support_dim: int,
+        min_v: float = -25,
+        max_v: float = +25,
+        support_dim: int = 200,
         learning_rate: Union[float, Schedule] = 3e-4,
         buffer_size: int = int(1e6),
         learning_starts: int = 100,
@@ -35,7 +35,7 @@ class C51SAC(OffPolicyAlgorithm):
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
     ):
-        super(C51SAC, self).__init__(
+        super(CVaRSAC, self).__init__(
             policy,
             env,
             C51SACPolicy,
@@ -156,6 +156,7 @@ class C51SAC(OffPolicyAlgorithm):
 
         ent_coef_losses, ent_coefs = [], []
         actor_losses, critic_losses = [], []
+        cvars = []
         qs = []
 
         for gradient_step in range(gradient_steps):
@@ -207,7 +208,7 @@ class C51SAC(OffPolicyAlgorithm):
             target_zs = self.projection(target_supports, target_zs)
             # Compute critic loss
 
-            critic_loss = -th.mean(th.log(current_zs) * target_zs)
+            critic_loss = -th.mean(th.log(current_zs + 1e-12) * target_zs)
             critic_losses.append(critic_loss.item())
 
             # Optimize the critic
@@ -219,8 +220,17 @@ class C51SAC(OffPolicyAlgorithm):
             # Alternative: actor_loss = th.mean(log_prob - qf1_pi)
             # Mean over all critic networks
             z_pi = th.cat(self.critic.forward(replay_data.observations, actions_pi), dim=1)
-            q_pi = z_pi @ self.supports
-            qs.append(th.mean(q_pi).item())
+
+            z_cdf = th.cumsum(z_pi, dim=-1)
+            adjust_pdf = th.where(
+                th.le(z_cdf, 0.3),
+                z_pi,
+                th.zeros_like(z_pi)
+            )
+            adjust_pdf = th.div(adjust_pdf, th.sum(adjust_pdf, dim=-1, keepdim=True))
+            q_pi = adjust_pdf @ self.supports
+            cvars.append(th.mean(q_pi).item())
+            qs.append(th.mean(z_pi @ self.supports).item())
             actor_loss = (ent_coef * log_prob - q_pi).mean()
             actor_losses.append(actor_loss.item())
 
@@ -235,6 +245,7 @@ class C51SAC(OffPolicyAlgorithm):
 
         self._n_updates += gradient_steps
 
+        logger.record("train/CVaR", np.mean(cvars))
         logger.record("train/Q", np.mean(qs))
         logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         logger.record("train/ent_coef", np.mean(ent_coefs))
@@ -256,7 +267,7 @@ class C51SAC(OffPolicyAlgorithm):
         reset_num_timesteps: bool = True,
     ) -> OffPolicyAlgorithm:
 
-        return super(C51SAC, self).learn(
+        return super(CVaRSAC, self).learn(
             total_timesteps=total_timesteps,
             callback=callback,
             log_interval=log_interval,
@@ -269,7 +280,7 @@ class C51SAC(OffPolicyAlgorithm):
         )
 
     def _excluded_save_params(self) -> List[str]:
-        return super(C51SAC, self)._excluded_save_params() + ["actor", "critic", "critic_target"]
+        return super(CVaRSAC, self)._excluded_save_params() + ["actor", "critic", "critic_target"]
 
     def _get_torch_save_params(self) -> Tuple[List[str], List[str]]:
         state_dicts = ["policy", "actor.optimizer", "critic.optimizer"]
@@ -288,6 +299,52 @@ if __name__ == "__main__":
     env = NavigationEnvAcc({"OBSTACLE_POSITIONS": obs_set[1], "Goal": goal_set[-1]})
 
     # model = SAC(SACPolicy, env, verbose=1)
-    model = C51SAC(C51SACPolicy, env, min_v=-20, max_v=20, support_dim=64, verbose=1)
-    model.learn(100000)
+    # model = CVaRSAC(C51SACPolicy, env, min_v=-25, max_v=25, support_dim=200, verbose=1)
+    # model.learn(300000)
+    # model.save("CVaR-0.3")
+
+
+    def evaluate(env, model, ep_n, alpha):
+        logs = []
+        for _ in range(ep_n):
+            obs = env.reset()
+            ep_reward = 0
+            ep_log = []
+            while True:
+                action, _ = model.predict(obs, deterministic=True)
+                next_obs, reward, done, info = env.step(action)
+                z_pi = th.cat(model.critic.forward(th.from_numpy(np.array([obs])).cuda(),
+                                                   th.from_numpy(np.array([action])).cuda()), dim=1)
+                z_cdf = th.cumsum(z_pi, dim=-1)
+                adjust_pdf = th.where(
+                    th.le(z_cdf, alpha),
+                    z_pi,
+                    th.zeros_like(z_pi)
+                )
+                adjust_pdf = th.div(adjust_pdf, th.sum(adjust_pdf, dim=-1, keepdim=True))
+                cvar = adjust_pdf @ model.supports
+                log = [obs, next_obs, reward, done, info,
+                       z_pi.cpu().detach().numpy(), cvar.cpu().detach().numpy()]
+                ep_log.append(log)
+                obs = next_obs
+                ep_reward += reward
+                if done:
+                    logs.append(ep_log)
+                    break
+        return logs
+
+
+    import pickle
+    for alpha in [0.2, 0.3, 0.4, 1.0]:
+        model = CVaRSAC.load(f"CVaR-{alpha}", min_v=-25, max_v=25, support_dim=200)
+        log = evaluate(env, model, 1000, alpha)
+        data = {
+            "min_v": 25,
+            "max_v": 25,
+            "support_dim": 200,
+            "alpha": alpha,
+            "data": log
+        }
+        with open(f'alpha{alpha}_ep_log.txt', 'wb') as f:
+            pickle.dump(data, f)
 
