@@ -307,6 +307,8 @@ class CMVCVaRSAC(OffPolicyAlgorithm):
 
         eta = int(round(remaining_steps / fps))
         logger.record("time/eta", timedelta(seconds=eta), exclude="tensorboard")
+        logger.record("train/CVaR Alpha", self.cvar_alpha)
+        logger.record("train/CMV Beta", self.cmv_beta)
         logger.record("train/CVaR", np.mean(cvars))
         logger.record("train/Q-value", np.mean(qs))
         logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
@@ -361,44 +363,52 @@ if __name__ == "__main__":
     from Navigation2d import NavigationEnvAcc
     from Navigation2d.config import obs_set, goal_set
     from stable_baselines3.common.vec_env import SubprocVecEnv
-    #from reptile import ReptileCallback
+    from reptile import *
+    import os
 
-    #callback = ReptileCallback(verbose=0)
+    def run(task_id, args):
+        env = NavigationEnvAcc({"OBSTACLE_POSITIONS": obs_set[1], "Goal": goal_set[-1]})
+        model = CMVCVaRSAC(env=env, policy=CMVC51SACPolicy, min_v=-25, max_v=25, support_dim=200,
+                           verbose=1, batch_size=256)
+        callback = LowCallback(task_id, args.port)
+        model.learn(total_timesteps=args.total_timesteps, callback=callback)
+        model.save(f"Reptile-{task_id}")
+        print('finish')
 
-    def evaluate(env, model, ep_n, alpha):
-        logs = []
-        for _ in range(ep_n):
-            obs = env.reset()
-            ep_reward = 0
-            ep_log = []
-            while True:
-                action, _ = model.predict(obs, deterministic=True)
-                next_obs, reward, done, info = env.step(action)
-                z_pi = th.cat(model.critic.forward(th.from_numpy(np.array([obs])).cuda(),
-                                                   th.from_numpy(np.array([action])).cuda()), dim=1)
-                z_cdf = th.cumsum(z_pi, dim=-1)
-                adjust_pdf = th.where(
-                    th.le(z_cdf, alpha),
-                    z_pi,
-                    th.zeros_like(z_pi)
-                )
-                adjust_pdf = th.div(adjust_pdf, th.sum(adjust_pdf, dim=-1, keepdim=True))
-                cvar = adjust_pdf @ model.supports
-                log = [obs, next_obs, reward, done, info,
-                       z_pi.cpu().detach().numpy(), cvar.cpu().detach().numpy()]
-                ep_log.append(log)
-                obs = next_obs
-                ep_reward += reward
-                if done:
-                    logs.append(ep_log)
-                    break
-        return logs
 
-    env = SubprocVecEnv(
-        [lambda: NavigationEnvAcc({"OBSTACLE_POSITIONS": obs_set[1], "Goal": goal_set[-1]}) for _ in range(1)])
-    model = CMVCVaRSAC(env=env, policy=CMVC51SACPolicy, min_v=-25, max_v=25, support_dim=200,
-                       verbose=1, batch_size=256)
-    model.learn(1000000)
-    model.save(f"CMVCVaRReptile")
+    def reptile_run(args):
+        np.random.seed()
+        env = NavigationEnvAcc({"OBSTACLE_POSITIONS": obs_set[1], "Goal": goal_set[-1]})
+        model = CMVCVaRSAC(env=env, policy=CMVC51SACPolicy, min_v=-25, max_v=25, support_dim=200,
+                           verbose=1, batch_size=256)
+        algo = Reptile(num_of_operator=args.num_workers, port=args.port, alpha=args.alpha, model=model, env=env)
+        algo.run()
+        algo.test()
+        algo.save("ReptileModel")
 
+
+    import argparse
+    from multiprocessing import Process
+
+    parser = argparse.ArgumentParser(description='experiment setting')
+    parser.add_argument('--num_workers',  type=int, default=12)
+    parser.add_argument('--total_timesteps',  type=int, default=250000)
+    parser.add_argument('--alpha', type=float, default=0.25)
+    parser.add_argument('--port', type=int, default=33333)
+
+    args = parser.parse_args()
+    p_list = []
+
+    for i in range(args.num_workers):
+        p = Process(target=run, args=(i, args, ))
+        p.start()
+        p_list.append(p)
+        print('make process')
+
+    p = Process(target=reptile_run, args=(args, ))
+    p.start()
+    p_list.append(p)
+    print('make reptile')
+    for proc in p_list:
+        proc.join()
 

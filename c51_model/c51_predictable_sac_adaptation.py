@@ -307,6 +307,8 @@ class CMVCVaRSAC(OffPolicyAlgorithm):
 
         eta = int(round(remaining_steps / fps))
         logger.record("time/eta", timedelta(seconds=eta), exclude="tensorboard")
+        logger.record("train/CVaR Alpha", self.cvar_alpha)
+        logger.record("train/CMV Beta", self.cmv_beta)
         logger.record("train/CVaR", np.mean(cvars))
         logger.record("train/Q-value", np.mean(qs))
         logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
@@ -361,9 +363,9 @@ if __name__ == "__main__":
     from Navigation2d import NavigationEnvAcc
     from Navigation2d.config import obs_set, goal_set
     from stable_baselines3.common.vec_env import SubprocVecEnv
-    #from reptile import ReptileCallback
 
-    #callback = ReptileCallback(verbose=0)
+    import pickle
+
 
     def evaluate(env, model, ep_n, alpha):
         logs = []
@@ -394,11 +396,40 @@ if __name__ == "__main__":
                     break
         return logs
 
-    env = SubprocVecEnv(
-        [lambda: NavigationEnvAcc({"OBSTACLE_POSITIONS": obs_set[1], "Goal": goal_set[-1]}) for _ in range(1)])
-    model = CMVCVaRSAC(env=env, policy=CMVC51SACPolicy, min_v=-25, max_v=25, support_dim=200,
-                       verbose=1, batch_size=256)
-    model.learn(1000000)
-    model.save(f"CMVCVaRReptile")
+    env = NavigationEnvAcc({"OBSTACLE_POSITIONS": obs_set[1], "Goal": goal_set[-1]})
 
+    rankings = []
+    for _ in range(100):
+        model = CMVCVaRSAC.load(f"ReptileModel")
+        model.set_env(env)
 
+        alpha = np.random.uniform(0.001, 1)
+        beta = np.random.exponential(2)
+
+        model.cvar_alpha = alpha
+        model.cmv_beta = beta
+
+        model.learn(30000)
+        model.save(f"Adap({alpha},{beta})")
+        logs = evaluate(env, model, 2, alpha)
+
+        data = {
+            "min_v": 25,
+            "max_v": 25,
+            "support_dim": 200,
+            "alpha": alpha,
+            "beta": beta,
+            "data": logs
+        }
+
+        count = 0
+        for log in logs:
+            count += int(log[-1][4]["is_success"])
+
+        rankings.append([alpha, beta, count])
+        print([alpha, beta, count])
+
+        with open(f"Adap({alpha},{beta})_logs", 'wb') as f:
+            pickle.dump(data, f)
+
+    print(sorted(rankings, key=lambda x: x[2]))

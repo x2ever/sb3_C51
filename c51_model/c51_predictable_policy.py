@@ -76,7 +76,8 @@ class CMVPredictor(BaseModel):
         action_dim = get_action_dim(self.action_space)
         self.common_feature_net = nn.Sequential(*create_mlp(features_dim + action_dim, net_arch[-1],
                                                             net_arch[:-1], activation_fn))
-        self.reward_net = nn.Linear(net_arch[-1], 1, bias=False)
+        self.reward_net = nn.Sequential(*[nn.Linear(net_arch[-1], 2048), nn.ReLU(),
+                                          nn.Linear(2048, 1)])
         self.next_feature_pred_net = nn.Linear(net_arch[-1], features_dim,)
 
         self.share_features_extractor = share_features_extractor
