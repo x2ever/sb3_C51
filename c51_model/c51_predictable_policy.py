@@ -1,6 +1,8 @@
 from stable_baselines3.common.policies import *
 from stable_baselines3.sac.policies import *
 from stable_baselines3.common.type_aliases import Schedule
+from torch.nn import LayerNorm, ReLU, Sequential
+import numpy as np
 
 
 class ContinuousDistributionCritic(BaseModel):
@@ -76,7 +78,8 @@ class CMVPredictor(BaseModel):
         action_dim = get_action_dim(self.action_space)
         self.common_feature_net = nn.Sequential(*create_mlp(features_dim + action_dim, net_arch[-1],
                                                             net_arch[:-1], activation_fn))
-        self.reward_net = nn.Linear(net_arch[-1], 1, bias=False)
+        self.reward_net = nn.Sequential(* [nn.Linear(net_arch[-1], 2048),  nn.ReLU(),
+                                           nn.Linear(2048, 1)])
         self.next_feature_pred_net = nn.Linear(net_arch[-1], features_dim,)
 
         self.share_features_extractor = share_features_extractor
@@ -92,6 +95,28 @@ class CMVPredictor(BaseModel):
         z_pred = self.next_feature_pred_net(feature)
 
         return r_pred, z_pred
+
+
+class LnMlpExtractor(FlattenExtractor):
+    def __init__(self, observation_space: gym.Space, net_arch=None, activation_fn=ReLU):
+        super(LnMlpExtractor, self).__init__(observation_space, )
+
+        flatten_dim = int(np.prod(observation_space.shape))
+        if net_arch is None:
+            net_arch = [2048, 2048]
+
+        if activation_fn == ReLU:
+            activation_fn = partial(ReLU, inplace=True)
+
+        LnMlp = create_mlp(flatten_dim, net_arch[-1], net_arch[:-1], activation_fn)
+        LnMlp.append(LayerNorm(net_arch[-1]))
+        LnMlp.append(activation_fn())
+        LnMlp.append(nn.Linear(net_arch[-1], flatten_dim))
+        self.LnMlp = Sequential(*LnMlp)
+
+    def forward(self, observations: th.Tensor) -> th.Tensor:
+        flatten = self.flatten(observations)
+        return self.LnMlp(flatten)
 
 
 class CMVC51SACPolicy(BasePolicy):
@@ -128,6 +153,8 @@ class CMVC51SACPolicy(BasePolicy):
 
         if net_arch is None:
             if features_extractor_class == FlattenExtractor:
+                net_arch = [256, 256]
+            elif features_extractor_class == LnMlpExtractor:
                 net_arch = [256, 256]
             else:
                 net_arch = []
@@ -188,7 +215,7 @@ class CMVC51SACPolicy(BasePolicy):
             critic_parameters = [param for name, param in self.critic.named_parameters() if
                                  "features_extractor" not in name]
             beta_critic_parameters = [param for name, param in self.beta_critic.named_parameters() if
-                                 "features_extractor" not in name]
+                                      "features_extractor" not in name]
 
         else:
             # Create a separate features extractor for the critic

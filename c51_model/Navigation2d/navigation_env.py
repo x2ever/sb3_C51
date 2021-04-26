@@ -301,6 +301,8 @@ class NavigationEnvDefault(gym.Env, EzPickle):
         self.drawlist = [self.obs_range_plt, self.drone, self.goal] + self.walls + self.obstacles.dynamic_bodies
         self._observe_lidar(drone_pos)
         self.world.Step(1.0 / FPS, 6 * 30, 2 * 30)
+
+        self.epi_reward = 0
         return np.copy(self.array_observation())
 
     def randomize_goal(self):
@@ -339,9 +341,10 @@ class NavigationEnvDefault(gym.Env, EzPickle):
                 reward = -10
             info['is_success'] = self.achieve_goal
             info['energy'] = self.energy
-            info['episode'] = {'r': reward, 'l': (1 - self.energy) * 1000}
+            info['episode'] = {'r': self.epi_reward + reward, 'l': (1 - self.energy) * 1000}
         obs = np.copy(self.array_observation())
         self.obs_queue.append(obs)
+        self.epi_reward += reward
         return obs, reward, done, info
 
     def render(self, mode='human'):
@@ -408,14 +411,10 @@ class NavigationEnvAcc(NavigationEnvDefault):
         self.obstacles.step()
         self.energy -= 1e-3
         pos = np.array(self.drone.position)
-        try:
-            self._observe_lidar(pos)
-            reward = np.linalg.norm(self.goal.position - before_pos) - np.linalg.norm(
-                self.goal.position - self.drone.position)
+        self._observe_lidar(pos)
+        reward = np.linalg.norm(self.goal.position - before_pos) - np.linalg.norm(
+            self.goal.position - self.drone.position)
 
-        except AssertionError:
-            self.game_over = True
-            self.nan_ending = True
 
         done = self.game_over
 
@@ -429,13 +428,14 @@ class NavigationEnvAcc(NavigationEnvDefault):
                 reward = -10
             info['is_success'] = self.achieve_goal
             info['energy'] = self.energy
-            info['episode'] = {'r': reward, 'l': (1 - self.energy) * 1000}
+            info['episode'] = {'r': reward + self.epi_reward, 'l': (1 - self.energy) * 1000}
         if not self.nan_ending:
             obs = np.copy(self.array_observation())
             self.obs_queue.append(obs)
         else:
             obs = np.copy(self.obs_queue[-1])
             self.obs_queue.append(obs)
+        self.epi_reward += reward
         return obs, reward, done, info
 
 

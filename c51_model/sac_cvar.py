@@ -14,7 +14,7 @@ class CVaRSAC(OffPolicyAlgorithm):
         max_v: float = +25,
         support_dim: int = 200,
         learning_rate: Union[float, Schedule] = 3e-4,
-        buffer_size: int = int(1e6),
+        buffer_size: int = int(5e4),
         learning_starts: int = 100,
         batch_size: int = 256,
         tau: float = 0.005,
@@ -32,10 +32,11 @@ class CVaRSAC(OffPolicyAlgorithm):
         tensorboard_log: Optional[str] = None,
         create_eval_env: bool = False,
         policy_kwargs: Dict[str, Any] = None,
-        verbose: int = 0,
+        verbose: int = 1,
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
+        cvar_alpha: float = 0.3,
     ):
         super(CVaRSAC, self).__init__(
             policy,
@@ -77,7 +78,7 @@ class CVaRSAC(OffPolicyAlgorithm):
         self.supports = th.from_numpy(
             np.array([min_v + i * self.interval for i in range(support_dim)], dtype=np.float32)
         ).to(self.device)
-
+        self.cvar_alpha = cvar_alpha
         if _init_setup_model:
             self._setup_model()
 
@@ -225,7 +226,7 @@ class CVaRSAC(OffPolicyAlgorithm):
 
             z_cdf = th.cumsum(z_pi, dim=-1)
             adjust_pdf = th.where(
-                th.le(z_cdf, 0.3),
+                th.le(z_cdf, self.cvar_alpha),
                 z_pi,
                 th.zeros_like(z_pi)
             )
@@ -247,7 +248,7 @@ class CVaRSAC(OffPolicyAlgorithm):
 
         self._n_updates += gradient_steps
         fps = int(self.num_timesteps / (time.time() - self.start_time))
-        remaining_steps = self.total_timesteps - self.num_timesteps
+        remaining_steps = self._total_timesteps - self.num_timesteps
 
         eta = int(round(remaining_steps / fps))
         logger.record("time/eta", timedelta(seconds=eta), exclude="tensorboard")
@@ -298,59 +299,6 @@ class CVaRSAC(OffPolicyAlgorithm):
         return state_dicts, saved_pytorch_variables
 
 
-if __name__ == "__main__":
-    from stable_baselines3 import SAC
-    from Navigation2d import NavigationEnvAcc, DeployEnv
-    from Navigation2d.config import obs_set, goal_set
-    env = NavigationEnvAcc({"OBSTACLE_POSITIONS": obs_set[1], "Goal": goal_set[-1]})
 
-    # model = SAC(SACPolicy, env, verbose=1)
-    # model = CVaRSAC(C51SACPolicy, env, min_v=-25, max_v=25, support_dim=200, verbose=1)
-    # model.learn(300000)
+
     # model.save("CVaR-0.3")
-
-
-    def evaluate(env, model, ep_n, alpha):
-        logs = []
-        for _ in range(ep_n):
-            obs = env.reset()
-            ep_reward = 0
-            ep_log = []
-            while True:
-                action, _ = model.predict(obs, deterministic=True)
-                next_obs, reward, done, info = env.step(action)
-                z_pi = th.cat(model.critic.forward(th.from_numpy(np.array([obs])).cuda(),
-                                                   th.from_numpy(np.array([action])).cuda()), dim=1)
-                z_cdf = th.cumsum(z_pi, dim=-1)
-                adjust_pdf = th.where(
-                    th.le(z_cdf, alpha),
-                    z_pi,
-                    th.zeros_like(z_pi)
-                )
-                adjust_pdf = th.div(adjust_pdf, th.sum(adjust_pdf, dim=-1, keepdim=True))
-                cvar = adjust_pdf @ model.supports
-                log = [obs, next_obs, reward, done, info,
-                       z_pi.cpu().detach().numpy(), cvar.cpu().detach().numpy()]
-                ep_log.append(log)
-                obs = next_obs
-                ep_reward += reward
-                if done:
-                    logs.append(ep_log)
-                    break
-        return logs
-
-
-    import pickle
-    for alpha in [0.2, 0.3, 0.4, 1.0]:
-        model = CVaRSAC.load(f"CVaR-{alpha}", min_v=-25, max_v=25, support_dim=200)
-        log = evaluate(env, model, 1000, alpha)
-        data = {
-            "min_v": 25,
-            "max_v": 25,
-            "support_dim": 200,
-            "alpha": alpha,
-            "data": log
-        }
-        with open(f'alpha{alpha}_ep_log.txt', 'wb') as f:
-            pickle.dump(data, f)
-
