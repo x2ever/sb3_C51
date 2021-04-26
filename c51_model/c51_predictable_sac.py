@@ -1,5 +1,5 @@
 from stable_baselines3.sac.sac import *
-from c51_model.c51_predictable_policy import CMVC51SACPolicy
+from c51_predictable_policy import CMVC51SACPolicy
 from stable_baselines3.common.buffers import ReplayBuffer
 import time
 from datetime import timedelta
@@ -16,7 +16,7 @@ class CMVCVaRSAC(OffPolicyAlgorithm):
         learning_rate: Union[float, Schedule] = 3e-4,
         buffer_size: int = int(5e4),
         learning_starts: int = 100,
-        batch_size: int = 64,
+        batch_size: int = 256,
         tau: float = 0.005,
         gamma: float = 0.99,
         train_freq: Union[int, Tuple[int, str]] = 1,
@@ -32,11 +32,14 @@ class CMVCVaRSAC(OffPolicyAlgorithm):
         tensorboard_log: Optional[str] = None,
         create_eval_env: bool = False,
         policy_kwargs: Dict[str, Any] = None,
-        verbose: int = 0,
+        verbose: int = 1,
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
-        cvar_alpha = 0.3
+        cvar_alpha: float = 0.3,
+        cmv_beta: float = 2,
+        minimize_cmv_reward: bool = True,
+        minimize_cmv_state: bool = True
     ):
         super(CMVCVaRSAC, self).__init__(
             policy,
@@ -80,6 +83,9 @@ class CMVCVaRSAC(OffPolicyAlgorithm):
         ).to(self.device)
         self._total_timesteps = None
         self.cvar_alpha = cvar_alpha
+        self.cmv_half_beta = cmv_beta / 2
+        self.minimize_cmv_reward = minimize_cmv_reward
+        self.minimize_cmv_state = minimize_cmv_state
         if _init_setup_model:
             self._setup_model()
 
@@ -233,7 +239,14 @@ class CMVCVaRSAC(OffPolicyAlgorithm):
             r_pred, z_pred = self.cmv_net(replay_data.observations, replay_data.actions)
             mse_r_pred = th.mean(th.square(r_pred - replay_data.rewards))
             mse_z_pred = th.mean(th.square(z_pred - next_z))
-            loss_cmv = mse_r_pred + mse_z_pred
+            if self.minimize_cmv_state and self.minimize_cmv_reward:
+                loss_cmv = mse_r_pred + mse_z_pred
+            elif self.minimize_cmv_state:
+                loss_cmv = mse_z_pred
+            elif self.minimize_cmv_reward:
+                loss_cmv = mse_r_pred
+            else:
+                raise ValueError
 
             reward_losses.append(mse_r_pred.item())
             feature_pred_losses.append(mse_z_pred.item())
@@ -286,7 +299,7 @@ class CMVCVaRSAC(OffPolicyAlgorithm):
             qs.append(th.mean(z_pi @ self.supports).item())
             q_beta_values_pi = th.cat(self.beta_critic.forward(replay_data.observations, actions_pi), dim=1)
             max_qf_beta_pi, _ = th.max(q_beta_values_pi, dim=1, keepdim=True)
-            actor_loss = (ent_coef * log_prob - q_pi + next_q_beta_values).mean()
+            actor_loss = (ent_coef * log_prob - q_pi + self.cmv_half_beta * next_q_beta_values).mean()
             actor_losses.append(actor_loss.item())
 
             # Optimize the actor
@@ -355,60 +368,19 @@ class CMVCVaRSAC(OffPolicyAlgorithm):
         return state_dicts, saved_pytorch_variables
 
 
+
 if __name__ == "__main__":
     from stable_baselines3 import SAC
     from Navigation2d import NavigationEnvAcc, DeployEnv
     from Navigation2d.config import obs_set, goal_set
     from stable_baselines3.common.vec_env import SubprocVecEnv
+    from tqdm import tqdm
 
-
-    def evaluate(env, model, ep_n, alpha):
-        logs = []
-        for _ in range(ep_n):
-            obs = env.reset()
-            ep_reward = 0
-            ep_log = []
-            while True:
-                action, _ = model.predict(obs, deterministic=True)
-                next_obs, reward, done, info = env.step(action)
-                z_pi = th.cat(model.critic.forward(th.from_numpy(np.array([obs])).cuda(),
-                                                   th.from_numpy(np.array([action])).cuda()), dim=1)
-                z_cdf = th.cumsum(z_pi, dim=-1)
-                adjust_pdf = th.where(
-                    th.le(z_cdf, alpha),
-                    z_pi,
-                    th.zeros_like(z_pi)
-                )
-                adjust_pdf = th.div(adjust_pdf, th.sum(adjust_pdf, dim=-1, keepdim=True))
-                cvar = adjust_pdf @ model.supports
-                log = [obs, next_obs, reward, done, info,
-                       z_pi.cpu().detach().numpy(), cvar.cpu().detach().numpy()]
-                ep_log.append(log)
-                obs = next_obs
-                ep_reward += reward
-                if done:
-                    logs.append(ep_log)
-                    break
-        return logs
 
 
     import pickle
+    import os
     for alpha in [0.2, 0.3, 0.4, 1.0]:
         env = SubprocVecEnv(
             [lambda: NavigationEnvAcc({"OBSTACLE_POSITIONS": obs_set[1], "Goal": goal_set[-1]}) for _ in range(1)])
-        model = CMVCVaRSAC(env=env, policy=CMVC51SACPolicy, min_v=-25, max_v=25, support_dim=200, cvar_alpha=alpha,
-                           verbose=1, batch_size=64)
-        model.learn(300000)
-        model.save(f"CMVCVaR{alpha}")
-        log = evaluate(env, model, 1000, alpha)
-        data = {
-            "min_v": 25,
-            "max_v": 25,
-            "support_dim": 200,
-            "alpha": alpha,
-            "data": log
-        }
-        with open(f'alpha{alpha}_ep_log.txt', 'wb') as f:
-            pickle.dump(data, f)
-        del model
-
+        model = CMVCVaRSAC.load(f"/workspace/files/CMVCVaR_pred2{alpha}")
